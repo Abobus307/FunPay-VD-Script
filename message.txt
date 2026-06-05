@@ -1,0 +1,617 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local TweenService = game:GetService("TweenService")
+local CoreGui = game:GetService("CoreGui")
+local UserInputService = game:GetService("UserInputService")
+local GuiService = game:GetService("GuiService")
+
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+local IsMobile = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+
+local function removeOldGui()
+    local oldPlayerGui = PlayerGui:FindFirstChild("CustomMainGui")
+    if oldPlayerGui then oldPlayerGui:Destroy() end
+    pcall(function()
+        local oldCoreGui = CoreGui:FindFirstChild("CustomMainGui")
+        if oldCoreGui then oldCoreGui:Destroy() end
+    end)
+end
+removeOldGui()
+
+local SETTINGS = {
+    GuiName = "SkillCheckPromptGui",
+    MainFrameName = "Check",
+    NeedleName = "Line",
+    TargetName = "Goal",
+    AngleOffsetStart = 104, 
+    AngleOffsetEnd = 114
+}
+
+local Flags = {
+    AutoSkillCheck = false,
+    EspSurvivors = false,
+    EspKiller = false,
+    EspGenerators = false
+}
+
+local Config = {
+    Version = "V2",
+    Method = "Perfect"
+}
+
+local TARGET_OFFSET = 106.5
+local TOLERANCE = 2.5
+local LATENCY_COMPENSATION = 0
+
+local lastGoalRotation = nil
+local hasClickedThisGoal = false
+local lastLineRotation = nil
+local lastTick = nil
+local wasActive = false
+
+local Perfect_LastGoalRotation = nil
+local Perfect_HasClickedThisGoal = false
+local Perfect_LastLineRotation = nil
+local Perfect_LastTick = nil
+local Perfect_WasActive = false
+
+local Instant_LastGoalInstance = nil
+local Instant_HasClicked = false
+
+local Generators = {}
+local espCache = {}
+-- Делаем ключи таблицы "слабыми", чтобы избежать утечек памяти, когда объекты удаляются из игры
+setmetatable(espCache, {__mode = "k"})
+
+for _, obj in ipairs(workspace:GetDescendants()) do
+    if obj.Name == "Generator" then table.insert(Generators, obj) end
+end
+workspace.DescendantAdded:Connect(function(obj)
+    if obj.Name == "Generator" then table.insert(Generators, obj) end
+end)
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "CustomMainGui"
+ScreenGui.ResetOnSpawn = false
+if not pcall(function() ScreenGui.Parent = CoreGui end) then
+    ScreenGui.Parent = PlayerGui
+end
+
+local targetHeightV1 = 320
+local targetHeightV2 = 375
+local currentHeight = Config.Version == "V2" and targetHeightV2 or targetHeightV1
+
+local MainFrame = Instance.new("Frame")
+MainFrame.Size = UDim2.new(0, 260, 0, currentHeight)
+MainFrame.Position = UDim2.new(0.1, 0, 0.2, 0)
+MainFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+MainFrame.BorderSizePixel = 0
+MainFrame.Active = true
+MainFrame.Draggable = true
+MainFrame.ClipsDescendants = true
+MainFrame.Parent = ScreenGui
+Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0, 8)
+
+local MainStroke = Instance.new("UIStroke")
+MainStroke.Color = Color3.fromRGB(60, 60, 70)
+MainStroke.Thickness = 1
+MainStroke.Parent = MainFrame
+
+local TopBar = Instance.new("Frame")
+TopBar.Size = UDim2.new(1, 0, 0, 40)
+TopBar.BackgroundColor3 = Color3.fromRGB(35, 35, 40)
+TopBar.BorderSizePixel = 0
+TopBar.Parent = MainFrame
+Instance.new("UICorner", TopBar).CornerRadius = UDim.new(0, 8)
+
+local TopBarFix = Instance.new("Frame")
+TopBarFix.Size = UDim2.new(1, 0, 0, 8)
+TopBarFix.Position = UDim2.new(0, 0, 1, -8)
+TopBarFix.BackgroundColor3 = Color3.fromRGB(35, 35, 40)
+TopBarFix.BorderSizePixel = 0
+TopBarFix.Parent = TopBar
+
+local TitleLabel = Instance.new("TextLabel")
+TitleLabel.Size = UDim2.new(1, -50, 1, 0)
+TitleLabel.Position = UDim2.new(0, 15, 0, 0)
+TitleLabel.BackgroundTransparency = 1
+TitleLabel.Text = "Vasia2 Lab"
+TitleLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+TitleLabel.TextSize = 16
+TitleLabel.Font = Enum.Font.GothamBold
+TitleLabel.TextXAlignment = Enum.TextXAlignment.Left
+TitleLabel.Parent = TopBar
+
+local MinimizeBtn = Instance.new("TextButton")
+MinimizeBtn.Size = UDim2.new(0, 30, 0, 30)
+MinimizeBtn.Position = UDim2.new(1, -35, 0.5, -15)
+MinimizeBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 55)
+MinimizeBtn.Text = "-"
+MinimizeBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
+MinimizeBtn.TextSize = 20
+MinimizeBtn.Font = Enum.Font.GothamBold
+MinimizeBtn.AutoButtonColor = false
+MinimizeBtn.Parent = TopBar
+Instance.new("UICorner", MinimizeBtn).CornerRadius = UDim.new(0, 6)
+
+local isMinimized = false
+MinimizeBtn.MouseButton1Click:Connect(function()
+    isMinimized = not isMinimized
+    if isMinimized then
+        TopBarFix.Visible = false
+        TweenService:Create(MainFrame, TweenInfo.new(0.4, Enum.EasingStyle.Exponential, Enum.EasingDirection.Out), {Size = UDim2.new(0, 260, 0, 40)}):Play()
+        TweenService:Create(MinimizeBtn, TweenInfo.new(0.2), {Rotation = 180}):Play()
+        MinimizeBtn.Text = "+"
+    else
+        TopBarFix.Visible = true
+        TweenService:Create(MainFrame, TweenInfo.new(0.4, Enum.EasingStyle.Exponential, Enum.EasingDirection.Out), {Size = UDim2.new(0, 260, 0, currentHeight)}):Play()
+        TweenService:Create(MinimizeBtn, TweenInfo.new(0.2), {Rotation = 0}):Play()
+        MinimizeBtn.Text = "-"
+    end
+end)
+
+local ContentFrame = Instance.new("Frame")
+ContentFrame.Size = UDim2.new(1, 0, 1, -40)
+ContentFrame.Position = UDim2.new(0, 0, 0, 40)
+ContentFrame.BackgroundTransparency = 1
+ContentFrame.Parent = MainFrame
+
+local UIListLayout = Instance.new("UIListLayout")
+UIListLayout.Parent = ContentFrame
+UIListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+UIListLayout.Padding = UDim.new(0, 8)
+UIListLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+
+local Padding = Instance.new("UIPadding")
+Padding.PaddingTop = UDim.new(0, 15)
+Padding.Parent = ContentFrame
+
+local function getHighlight(target, color, name)
+    if not espCache[target] then espCache[target] = {} end
+    local hl = espCache[target][name]
+    
+    if not hl then
+        hl = target:FindFirstChild(name) or Instance.new("Highlight")
+        hl.Name = name
+        hl.FillColor = color
+        hl.FillTransparency = 1
+        hl.OutlineColor = Color3.fromRGB(255, 255, 255)
+        hl.OutlineTransparency = 1
+        hl.Adornee = target
+        hl.Parent = target
+        espCache[target][name] = hl
+    end
+    
+    if not hl.Enabled or hl.FillTransparency == 1 then
+        hl.Enabled = true
+        hl.FillColor = color
+        TweenService:Create(hl, TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {FillTransparency = 0.5, OutlineTransparency = 0}):Play()
+    else
+        hl.FillColor = color
+    end
+    
+    return hl
+end
+
+local function disableHighlight(target, name)
+    local hl = nil
+    if espCache[target] and espCache[target][name] then
+        hl = espCache[target][name]
+    else
+        hl = target:FindFirstChild(name)
+    end
+    
+    if hl and hl.Enabled and hl.FillTransparency ~= 1 then
+        local tween = TweenService:Create(hl, TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {FillTransparency = 1, OutlineTransparency = 1})
+        tween.Completed:Connect(function()
+            if hl.FillTransparency == 1 then
+                hl.Enabled = false
+            end
+        end)
+        tween:Play()
+    end
+end
+
+local function clearAllESP(name)
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p.Character then disableHighlight(p.Character, name) end
+    end
+    for _, obj in ipairs(Generators) do
+        if obj.Parent then disableHighlight(obj, name) end
+    end
+end
+
+local function updateESP()
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer and p.Character and p.Character:FindFirstChild("HumanoidRootPart") then
+            local isKiller = p:GetAttribute("Killer") or p:GetAttribute("Role") == "Killer" or p.Name == "Killer" or (p.Team and (p.Team.Name == "Killer" or p.TeamColor == BrickColor.new("Really red")))
+            if isKiller then
+                if Flags.EspKiller then getHighlight(p.Character, Color3.fromRGB(255, 60, 60), "KillerESP") else disableHighlight(p.Character, "KillerESP") end
+                disableHighlight(p.Character, "SurvivorESP")
+            else
+                if Flags.EspSurvivors then getHighlight(p.Character, Color3.fromRGB(80, 170, 255), "SurvivorESP") else disableHighlight(p.Character, "SurvivorESP") end
+                disableHighlight(p.Character, "KillerESP")
+            end
+        end
+    end
+    for _, obj in ipairs(Generators) do
+        if obj.Parent then
+            if Flags.EspGenerators then getHighlight(obj, Color3.fromRGB(255, 210, 60), "GeneratorESP") else disableHighlight(obj, "GeneratorESP") end
+        end
+    end
+end
+
+task.spawn(function()
+    while true do
+        task.wait(0.2)
+        if ScreenGui.Parent then updateESP() else break end
+    end
+end)
+
+local function PressSkill()
+    if IsMobile then
+        local btn = PlayerGui:FindFirstChild("check", true) or PlayerGui:FindFirstChild("repair", true) or PlayerGui:FindFirstChild("action", true)
+        if btn and btn:IsA("GuiObject") then
+            local pos = btn.AbsolutePosition
+            local size = btn.AbsoluteSize
+            local inset = GuiService:GetGuiInset()
+            local x = pos.X + (size.X / 2) + inset.X
+            local y = pos.Y + (size.Y / 2) + inset.Y
+            pcall(function() VirtualInputManager:SendTouchEvent(8822, Enum.UserInputState.Begin.Value, x, y) end)
+            task.wait(0.01)
+            pcall(function() VirtualInputManager:SendTouchEvent(8822, Enum.UserInputState.End.Value, x, y) end)
+            pcall(function() if firesignal and btn.MouseButton1Click then firesignal(btn.MouseButton1Click) end end)
+        end
+    else
+        pcall(function() VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Space, false, game) end)
+        task.wait(0.01)
+        pcall(function() VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Space, false, game) end)
+    end
+end
+
+local function GetSkillCheck()
+    for _, guiName in ipairs({"SkillCheckPromptGui", "SkillCheckPromptGui-con"}) do
+        local gui = PlayerGui:FindFirstChild(guiName, true)
+        if gui then
+            local check = gui:FindFirstChild("Check", true)
+            if check and check.Visible then
+                local line = check:FindFirstChild("Line", true)
+                local goal = check:FindFirstChild("Goal", true)
+                if line and goal then return line, goal end
+            end
+        end
+    end
+    return nil, nil
+end
+
+local function AngularDelta(from, to)
+    return (to - from + 540) % 360 - 180
+end
+
+local function CrossedZone(prevLr, lr, startPos, endPos)
+    local function inZone(r)
+        if startPos > endPos then return r >= startPos or r <= endPos else return r >= startPos and r <= endPos end
+    end
+    if inZone(lr) then return true end
+    if prevLr == nil then return false end
+    
+    local moved = (lr - prevLr + 360) % 360
+    if moved > 0 and moved < 90 then
+        local distToStart = (startPos - prevLr + 360) % 360
+        if moved >= distToStart then return true end
+    end
+    return false
+end
+
+local function NormalModeUpdate()
+    local line, goal = GetSkillCheck()
+    if not (line and goal) then
+        lastGoalRotation = nil
+        hasClickedThisGoal = false
+        lastLineRotation = nil
+        lastTick = nil
+        wasActive = false
+        return
+    end
+    local lr = line.Rotation % 360
+    local gr = goal.Rotation % 360
+    local currentTick = os.clock()
+    
+    if not wasActive then
+        wasActive = true
+        hasClickedThisGoal = false
+        lastGoalRotation = gr
+        lastLineRotation = lr
+        lastTick = currentTick
+        return
+    end
+    
+    if lastGoalRotation ~= nil then
+        if math.abs(AngularDelta(lastGoalRotation, gr)) > 5 then
+            hasClickedThisGoal = false
+            lastLineRotation = nil
+            lastTick = nil
+        end
+    end
+    lastGoalRotation = gr
+    
+    if hasClickedThisGoal then
+        lastLineRotation = lr
+        lastTick = currentTick
+        return
+    end
+    
+    if lastLineRotation and lastTick then
+        local dt = currentTick - lastTick
+        if dt > 0 then
+            local lineSpeed = AngularDelta(lastLineRotation, lr) / dt
+            local predictedLr = (lr + lineSpeed * dt * LATENCY_COMPENSATION) % 360
+            local startPos = (gr + TARGET_OFFSET - TOLERANCE) % 360
+            local endPos = (gr + TARGET_OFFSET + TOLERANCE) % 360
+            if CrossedZone(lastLineRotation, predictedLr, startPos, endPos) then
+                hasClickedThisGoal = true
+                task.spawn(function()
+                    task.wait(0.03)
+                    PressSkill()
+                end)
+            end
+        end
+    end
+    lastLineRotation = lr
+    lastTick = currentTick
+end
+
+local function PerfectModeUpdate()
+    local line, goal = GetSkillCheck()
+    if not (line and goal) then
+        Perfect_LastGoalRotation = nil
+        Perfect_HasClickedThisGoal = false
+        Perfect_LastLineRotation = nil
+        Perfect_LastTick = nil
+        Perfect_WasActive = false
+        return
+    end
+    local lr = line.Rotation % 360
+    local gr = goal.Rotation % 360
+    local currentTick = os.clock()
+    
+    if not Perfect_WasActive then
+        Perfect_WasActive = true
+        Perfect_HasClickedThisGoal = false
+        Perfect_LastGoalRotation = gr
+        Perfect_LastLineRotation = lr
+        Perfect_LastTick = currentTick
+        return
+    end
+    
+    if Perfect_LastGoalRotation ~= nil then
+        if math.abs(AngularDelta(Perfect_LastGoalRotation, gr)) > 5 then
+            Perfect_HasClickedThisGoal = false
+            Perfect_LastLineRotation = nil
+            Perfect_LastTick = nil
+        end
+    end
+    Perfect_LastGoalRotation = gr
+    
+    if Perfect_HasClickedThisGoal then
+        Perfect_LastLineRotation = lr
+        Perfect_LastTick = currentTick
+        return
+    end
+    
+    if Perfect_LastLineRotation and Perfect_LastTick then
+        local dt = currentTick - Perfect_LastTick
+        if dt > 0 then
+            local lineSpeed = AngularDelta(Perfect_LastLineRotation, lr) / dt
+            local predictedLr = (lr + lineSpeed * dt * LATENCY_COMPENSATION) % 360
+            local startPos = (gr + 104) % 360
+            local endPos = (gr + 108) % 360
+            if CrossedZone(Perfect_LastLineRotation, predictedLr, startPos, endPos) then
+                Perfect_HasClickedThisGoal = true
+                PressSkill()
+            end
+        end
+    end
+    Perfect_LastLineRotation = lr
+    Perfect_LastTick = currentTick
+end
+
+local function InstantModeUpdate()
+    local line, goal = GetSkillCheck()
+    if not (line and goal) then
+        Instant_LastGoalInstance = nil
+        Instant_HasClicked = false
+        return
+    end
+    
+    if Instant_LastGoalInstance ~= goal then
+        Instant_LastGoalInstance = goal
+        Instant_HasClicked = false
+    end
+    
+    if not Instant_HasClicked then
+        Instant_HasClicked = true
+        task.spawn(function()
+            task.wait(0.01)
+            local currentLine, currentGoal = GetSkillCheck()
+            if currentLine and currentGoal then
+                local perfectRot = (currentGoal.Rotation % 360 + 106) % 360
+                pcall(function() currentLine.Rotation = perfectRot end)
+                PressSkill()
+            end
+        end)
+    end
+end
+
+local function createSelector(title, options, defaultVal, callback)
+    local Frame = Instance.new("Frame")
+    Frame.Size = UDim2.new(0, 230, 0, 45)
+    Frame.BackgroundColor3 = Color3.fromRGB(35, 35, 40)
+    Frame.ClipsDescendants = true
+    Frame.Parent = ContentFrame
+    Instance.new("UICorner", Frame).CornerRadius = UDim.new(0, 6)
+
+    local Label = Instance.new("TextLabel")
+    Label.Size = UDim2.new(0.4, 0, 1, 0)
+    Label.Position = UDim2.new(0, 10, 0, 0)
+    Label.BackgroundTransparency = 1
+    Label.Text = title
+    Label.TextColor3 = Color3.fromRGB(220, 220, 220)
+    Label.TextSize = 14
+    Label.Font = Enum.Font.GothamMedium
+    Label.TextXAlignment = Enum.TextXAlignment.Left
+    Label.Parent = Frame
+
+    local Btn = Instance.new("TextButton")
+    Btn.Size = UDim2.new(0.5, 0, 0.7, 0)
+    Btn.Position = UDim2.new(0.45, 0, 0.15, 0)
+    Btn.BackgroundColor3 = Color3.fromRGB(50, 50, 55)
+    Btn.Text = defaultVal
+    Btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    Btn.Font = Enum.Font.GothamMedium
+    Btn.TextSize = 13
+    Btn.Parent = Frame
+    Instance.new("UICorner", Btn).CornerRadius = UDim.new(0, 4)
+
+    Btn.MouseButton1Click:Connect(function()
+        local nextIdx = (table.find(options, Btn.Text) % #options) + 1
+        Btn.Text = options[nextIdx]
+        TweenService:Create(Btn, TweenInfo.new(0.1, Enum.EasingStyle.Sine, Enum.EasingDirection.Out), {Size = UDim2.new(0.45, 0, 0.6, 0), Position = UDim2.new(0.475, 0, 0.2, 0)}):Play()
+        task.delay(0.1, function()
+            TweenService:Create(Btn, TweenInfo.new(0.1, Enum.EasingStyle.Sine, Enum.EasingDirection.In), {Size = UDim2.new(0.5, 0, 0.7, 0), Position = UDim2.new(0.45, 0, 0.15, 0)}):Play()
+        end)
+        callback(options[nextIdx])
+    end)
+
+    return Frame
+end
+
+local MethodSelector = createSelector("SC Mode", {"Normal", "Perfect", "Instant"}, Config.Method, function(val)
+    Config.Method = val
+end)
+MethodSelector.Size = Config.Version == "V2" and UDim2.new(0, 230, 0, 45) or UDim2.new(0, 230, 0, 0)
+MethodSelector.Visible = Config.Version == "V2"
+
+createSelector("SkillCheck Ver.", {"V1", "V2"}, Config.Version, function(val)
+    Config.Version = val
+    if val == "V2" then
+        currentHeight = targetHeightV2
+        MethodSelector.Visible = true
+        TweenService:Create(MethodSelector, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Size = UDim2.new(0, 230, 0, 45)}):Play()
+        if not isMinimized then
+            TweenService:Create(MainFrame, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Size = UDim2.new(0, 260, 0, currentHeight)}):Play()
+        end
+    else
+        currentHeight = targetHeightV1
+        local tween = TweenService:Create(MethodSelector, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Size = UDim2.new(0, 230, 0, 0)})
+        tween.Completed:Connect(function()
+            if Config.Version == "V1" then MethodSelector.Visible = false end
+        end)
+        tween:Play()
+        if not isMinimized then
+            TweenService:Create(MainFrame, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Size = UDim2.new(0, 260, 0, currentHeight)}):Play()
+        end
+    end
+end)
+
+local function createToggle(text, flagName)
+    local ToggleContainer = Instance.new("Frame")
+    ToggleContainer.Size = UDim2.new(0, 230, 0, 45)
+    ToggleContainer.BackgroundColor3 = Color3.fromRGB(35, 35, 40)
+    ToggleContainer.Parent = ContentFrame
+    Instance.new("UICorner", ToggleContainer).CornerRadius = UDim.new(0, 6)
+
+    local Label = Instance.new("TextLabel")
+    Label.Size = UDim2.new(1, -60, 1, 0)
+    Label.Position = UDim2.new(0, 10, 0, 0)
+    Label.BackgroundTransparency = 1
+    Label.Text = text
+    Label.TextColor3 = Color3.fromRGB(220, 220, 220)
+    Label.TextSize = 14
+    Label.Font = Enum.Font.GothamMedium
+    Label.TextXAlignment = Enum.TextXAlignment.Left
+    Label.Parent = ToggleContainer
+
+    local SwitchBg = Instance.new("Frame")
+    SwitchBg.Size = UDim2.new(0, 40, 0, 20)
+    SwitchBg.Position = UDim2.new(1, -50, 0.5, -10)
+    SwitchBg.BackgroundColor3 = Color3.fromRGB(200, 60, 60)
+    SwitchBg.Parent = ToggleContainer
+    Instance.new("UICorner", SwitchBg).CornerRadius = UDim.new(1, 0)
+
+    local Indicator = Instance.new("Frame")
+    Indicator.Size = UDim2.new(0, 16, 0, 16)
+    Indicator.Position = UDim2.new(0, 2, 0.5, -8)
+    Indicator.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    Indicator.Parent = SwitchBg
+    Instance.new("UICorner", Indicator).CornerRadius = UDim.new(1, 0)
+
+    local Btn = Instance.new("TextButton")
+    Btn.Size = UDim2.new(1, 0, 1, 0)
+    Btn.BackgroundTransparency = 1
+    Btn.Text = ""
+    Btn.Parent = ToggleContainer
+
+    Btn.MouseButton1Click:Connect(function()
+        Flags[flagName] = not Flags[flagName]
+        local state = Flags[flagName]
+        local endPos = state and UDim2.new(1, -18, 0.5, -8) or UDim2.new(0, 2, 0.5, -8)
+        local endColor = state and Color3.fromRGB(60, 200, 60) or Color3.fromRGB(200, 60, 60)
+        TweenService:Create(Indicator, TweenInfo.new(0.25, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {Position = endPos}):Play()
+        TweenService:Create(SwitchBg, TweenInfo.new(0.25), {BackgroundColor3 = endColor}):Play()
+        if not state then
+            if flagName == "EspKiller" then clearAllESP("KillerESP")
+            elseif flagName == "EspSurvivors" then clearAllESP("SurvivorESP")
+            elseif flagName == "EspGenerators" then clearAllESP("GeneratorESP")
+            end
+        end
+    end)
+end
+
+createToggle("Auto SkillCheck", "AutoSkillCheck")
+createToggle("ESP Survivors", "EspSurvivors")
+createToggle("ESP Killer", "EspKiller")
+createToggle("ESP Generators", "EspGenerators")
+
+local lastSkillCheckTime = 0
+
+RunService.RenderStepped:Connect(function()
+    if not Flags.AutoSkillCheck or not ScreenGui.Parent then return end
+
+    if Config.Version == "V1" then
+        local gui = PlayerGui:FindFirstChild(SETTINGS.GuiName)
+        if gui then
+            local mainFrame = gui:FindFirstChild(SETTINGS.MainFrameName)
+            if mainFrame and mainFrame.Visible then
+                local needle = mainFrame:FindFirstChild(SETTINGS.NeedleName)
+                local target = mainFrame:FindFirstChild(SETTINGS.TargetName)
+                if needle and target then
+                    local needleRotation = needle.Rotation % 360
+                    local targetRotation = target.Rotation % 360
+                    local zoneStart = (targetRotation + SETTINGS.AngleOffsetStart - 3) % 360
+                    local zoneEnd = (targetRotation + SETTINGS.AngleOffsetEnd + 1) % 360
+                    local isInsideZone = false
+                    if zoneStart > zoneEnd then
+                        if needleRotation >= zoneStart or needleRotation <= zoneEnd then isInsideZone = true end
+                    else
+                        if needleRotation >= zoneStart and needleRotation <= zoneEnd then isInsideZone = true end
+                    end
+                    if isInsideZone and (os.clock() - lastSkillCheckTime > 0.4) then
+                        lastSkillCheckTime = os.clock()
+                        PressSkill()
+                    end
+                end
+            end
+        end
+    elseif Config.Version == "V2" then
+        if Config.Method == "Normal" then
+            NormalModeUpdate()
+        elseif Config.Method == "Perfect" then
+            PerfectModeUpdate()
+        elseif Config.Method == "Instant" then
+            InstantModeUpdate()
+        end
+    end
+end)
